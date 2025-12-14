@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { View, StyleSheet, ScrollView } from 'react-native';
+import React, { useState, useRef } from 'react';
+import { View, StyleSheet, ScrollView, Animated } from 'react-native';
 import {
   Text,
   TextInput,
@@ -8,11 +8,14 @@ import {
   Snackbar,
   useTheme,
   Portal,
+  HelperText,
+  ProgressBar
 } from 'react-native-paper';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { users } from '../services/api';
 import { RootStackParamList } from '../types';
+import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'ChangePassword'>;
 
@@ -20,31 +23,52 @@ const ChangePasswordScreen = ({ navigation }: Props) => {
   const { colors } = useTheme();
   const insets = useSafeAreaInsets();
 
+  // Refs for keyboard navigation
+  const newPasswordRef = useRef<any>(null);
+  const confirmPasswordRef = useRef<any>(null);
+
+  // State
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
 
-  const [isCurrentPasswordSecure, setIsCurrentPasswordSecure] = useState(true);
-  const [isNewPasswordSecure, setIsNewPasswordSecure] = useState(true);
+  const [isCurrentVisible, setIsCurrentVisible] = useState(false);
+  const [isNewVisible, setIsNewVisible] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState('');
   const [error, setError] = useState('');
+
+  // Validations
+  const isValidLength = newPassword.length >= 6;
+  const passwordsMatch = newPassword === confirmPassword && newPassword !== '';
+
+  const getStrengthColor = () => {
+    if (newPassword.length === 0) return colors.surfaceVariant;
+    if (newPassword.length < 6) return colors.error;
+    if (newPassword.length < 10) return '#FFC107'; // Amber
+    return colors.primary; // Green/Primary
+  };
+
+  const getStrengthProgress = () => {
+    if (newPassword.length === 0) return 0;
+    return Math.min(newPassword.length / 10, 1);
+  };
 
   const handleChangePassword = async () => {
     setError('');
     setSuccess('');
 
     if (!currentPassword || !newPassword || !confirmPassword) {
-      setError('Please fill out all fields.');
+      setError('All fields are required.');
       return;
     }
-    if (newPassword !== confirmPassword) {
-      setError('New passwords do not match.');
+    if (!isValidLength) {
+      setError('Password is too short.');
       return;
     }
-    if (newPassword.length < 6) {
-      setError('New password must be at least 6 characters long.');
+    if (!passwordsMatch) {
+      setError('Passwords do not match.');
       return;
     }
 
@@ -55,6 +79,8 @@ const ChangePasswordScreen = ({ navigation }: Props) => {
         newPassword,
       });
       setSuccess(response.message || 'Password changed successfully!');
+      
+      // Clear fields
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
@@ -68,85 +94,88 @@ const ChangePasswordScreen = ({ navigation }: Props) => {
   };
 
   return (
-    <View style={[styles.flexContainer, { backgroundColor: colors.elevation.level1 }]}>
+    <View style={[styles.container, { backgroundColor: colors.background }]}>
       <ScrollView
-        style={styles.flexContainer}
-        contentContainerStyle={{
-          paddingTop: insets.top + 24,
-          paddingBottom: insets.bottom + 24,
-          paddingHorizontal: 16,
-        }}
+        contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 20 }]}
         keyboardShouldPersistTaps="handled"
       >
-        <Text variant="headlineSmall" style={styles.title}>
-          Update Your Password
-        </Text>
-        <Text variant="bodyMedium" style={[styles.subtitle, { color: colors.onSurfaceVariant }]}>
-          Your new password must be at least 6 characters long.
-        </Text>
+        <View style={styles.header}>
+          <Text variant="headlineSmall" style={{ fontWeight: 'bold', color: colors.onSurface }}>
+            Secure Your Account
+          </Text>
+          <Text variant="bodyMedium" style={{ color: colors.onSurfaceVariant, marginTop: 4 }}>
+            Choose a strong password to protect your data.
+          </Text>
+        </View>
 
-        <Card
-          style={[styles.card, { backgroundColor: colors.surface }]}
-          elevation={1}
-        >
-          <Card.Content>
+        <Card style={[styles.card, { backgroundColor: colors.surface }]} mode="contained">
+          <Card.Content style={{ gap: 16 }}>
+            
             <TextInput
               label="Current Password"
               value={currentPassword}
               onChangeText={setCurrentPassword}
-              secureTextEntry={isCurrentPasswordSecure}
+              secureTextEntry={!isCurrentVisible}
               mode="outlined"
-              style={styles.input}
-              disabled={loading}
-              left={<TextInput.Icon icon="lock-check-outline" />}
-              right={
-                <TextInput.Icon
-                  icon={isCurrentPasswordSecure ? 'eye-off' : 'eye'}
-                  onPress={() =>
-                    setIsCurrentPasswordSecure(!isCurrentPasswordSecure)
-                  }
-                />
-              }
+              returnKeyType="next"
+              onSubmitEditing={() => newPasswordRef.current?.focus()}
+              right={<TextInput.Icon icon={isCurrentVisible ? 'eye-off' : 'eye'} onPress={() => setIsCurrentVisible(!isCurrentVisible)} />}
             />
+
+            <View>
+              <TextInput
+                ref={newPasswordRef}
+                label="New Password"
+                value={newPassword}
+                onChangeText={setNewPassword}
+                secureTextEntry={!isNewVisible}
+                mode="outlined"
+                returnKeyType="next"
+                onSubmitEditing={() => confirmPasswordRef.current?.focus()}
+                right={<TextInput.Icon icon={isNewVisible ? 'eye-off' : 'eye'} onPress={() => setIsNewVisible(!isNewVisible)} />}
+              />
+              <ProgressBar 
+                progress={getStrengthProgress()} 
+                color={getStrengthColor()} 
+                style={styles.strengthBar} 
+              />
+            </View>
+
             <TextInput
-              label="New Password"
-              value={newPassword}
-              onChangeText={setNewPassword}
-              secureTextEntry={isNewPasswordSecure}
-              mode="outlined"
-              style={styles.input}
-              disabled={loading}
-              left={<TextInput.Icon icon="lock-outline" />}
-              right={
-                <TextInput.Icon
-                  icon={isNewPasswordSecure ? 'eye-off' : 'eye'}
-                  onPress={() =>
-                    setIsNewPasswordSecure(!isNewPasswordSecure)
-                  }
-                />
-              }
-            />
-            <TextInput
+              ref={confirmPasswordRef}
               label="Confirm New Password"
               value={confirmPassword}
               onChangeText={setConfirmPassword}
-              secureTextEntry={isNewPasswordSecure}
+              secureTextEntry={!isNewVisible}
               mode="outlined"
-              style={styles.input}
-              disabled={loading}
-              left={<TextInput.Icon icon="lock-outline" />}
+              returnKeyType="done"
+              onSubmitEditing={handleChangePassword}
+              error={confirmPassword.length > 0 && !passwordsMatch}
             />
           </Card.Content>
         </Card>
+
+        {/* Requirements Checklist */}
+        <View style={styles.requirementsContainer}>
+          <RequirementRow 
+            label="At least 6 characters" 
+            met={isValidLength} 
+            colors={colors} 
+          />
+          <RequirementRow 
+            label="Passwords match" 
+            met={passwordsMatch} 
+            colors={colors} 
+          />
+        </View>
 
         <Button
           mode="contained"
           onPress={handleChangePassword}
           loading={loading}
-          disabled={loading}
+          disabled={loading || !isValidLength || !passwordsMatch || !currentPassword}
           style={styles.button}
-          contentStyle={styles.buttonContent}
-          labelStyle={styles.buttonLabel}
+          contentStyle={{ paddingVertical: 6 }}
         >
           Update Password
         </Button>
@@ -156,26 +185,14 @@ const ChangePasswordScreen = ({ navigation }: Props) => {
         <Snackbar
           visible={!!error}
           onDismiss={() => setError('')}
-          duration={4000}
           style={{ backgroundColor: colors.errorContainer }}
-          action={{
-            label: 'Dismiss',
-            onPress: () => setError(''),
-            textColor: colors.onErrorContainer,
-          }}
         >
           <Text style={{ color: colors.onErrorContainer }}>{error}</Text>
         </Snackbar>
         <Snackbar
           visible={!!success}
           onDismiss={() => setSuccess('')}
-          duration={2000}
           style={{ backgroundColor: colors.primaryContainer }}
-          action={{
-            label: 'Dismiss',
-            onPress: () => setSuccess(''),
-            textColor: colors.onPrimaryContainer,
-          }}
         >
           <Text style={{ color: colors.onPrimaryContainer }}>{success}</Text>
         </Snackbar>
@@ -184,31 +201,29 @@ const ChangePasswordScreen = ({ navigation }: Props) => {
   );
 };
 
+// Helper Component for Checklist
+const RequirementRow = ({ label, met, colors }: any) => (
+  <View style={styles.reqRow}>
+    <MaterialCommunityIcons 
+      name={met ? "check-circle" : "circle-outline"} 
+      size={16} 
+      color={met ? colors.primary : colors.onSurfaceVariant} 
+    />
+    <Text variant="bodySmall" style={{ marginLeft: 8, color: met ? colors.onSurface : colors.onSurfaceVariant }}>
+      {label}
+    </Text>
+  </View>
+);
+
 const styles = StyleSheet.create({
-  flexContainer: {
-    flex: 1,
-  },
-  title: {
-    fontWeight: 'bold',
-    marginBottom: 8,
-  },
-  subtitle: {
-    marginBottom: 24,
-  },
-  card: {},
-  input: {
-    marginBottom: 16,
-  },
-  button: {
-    marginTop: 16, // Add margin from the card
-  },
-  buttonContent: {
-    paddingVertical: 8,
-  },
-  buttonLabel: {
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
+  container: { flex: 1 },
+  scrollContent: { padding: 20 },
+  header: { marginBottom: 24 },
+  card: { borderRadius: 12 },
+  strengthBar: { height: 4, borderRadius: 2, marginTop: 6 },
+  requirementsContainer: { marginTop: 16, marginLeft: 8, gap: 8 },
+  reqRow: { flexDirection: 'row', alignItems: 'center' },
+  button: { marginTop: 32 },
 });
 
 export default ChangePasswordScreen;

@@ -1,15 +1,15 @@
 import React, { useState, useCallback, useRef } from 'react';
-import { View, StyleSheet, Animated } from 'react-native';
+import { View, StyleSheet, Animated, Vibration, Platform } from 'react-native';
 import { Text, Button, useTheme, ActivityIndicator } from 'react-native-paper';
-import { CameraView, BarcodeScanningResult, useCameraPermissions, BarcodeType } from 'expo-camera';
+import { CameraView, BarcodeScanningResult, useCameraPermissions } from 'expo-camera';
 import * as Location from 'expo-location';
-import { CompositeScreenProps } from '@react-navigation/native';
+import { CompositeScreenProps, useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { BottomTabScreenProps } from '@react-navigation/bottom-tabs';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { useFocusEffect, useIsFocused } from '@react-navigation/native';
+import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
+
 import { qr } from '../services/api';
 import { TabParamList, RootStackParamList } from '../types';
-import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
 
 type Props = CompositeScreenProps<
   BottomTabScreenProps<TabParamList, 'Scan'>,
@@ -17,337 +17,332 @@ type Props = CompositeScreenProps<
 >;
 
 type PermissionStatus = 'checking' | 'granted' | 'denied';
-type ScanStatus = 'scanning' | 'loading' | 'error';
+type ScanStatus = 'scanning' | 'processing' | 'success' | 'error';
 
-const QR_FRAME_SIZE = 250;
+const QR_FRAME_SIZE = 260;
 
 const ScanScreen = ({ navigation }: Props) => {
   const { colors } = useTheme();
-  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const isFocused = useIsFocused();
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
 
+  // State
   const [permissionStatus, setPermissionStatus] = useState<PermissionStatus>('checking');
   const [scanStatus, setScanStatus] = useState<ScanStatus>('scanning');
-  const [statusMessage, setStatusMessage] = useState('');
+  const [errorMessage, setErrorMessage] = useState('');
 
-  const isScanning = useRef(false);
-  const scanAnimation = useRef(new Animated.Value(0)).current;
+  // Explicitly control camera mounting
+  const [cameraActive, setCameraActive] = useState(true);
 
-  const startAnimation = () => {
-    scanAnimation.setValue(0);
+  const isProcessingRef = useRef(false);
+  const scanAnim = useRef(new Animated.Value(0)).current;
+
+  // Animation Logic
+  const startScanAnimation = () => {
+    scanAnim.setValue(0);
     Animated.loop(
       Animated.sequence([
-        Animated.timing(scanAnimation, {
+        Animated.timing(scanAnim, {
           toValue: 1,
-          duration: 2500,
+          duration: 2000,
           useNativeDriver: true,
         }),
-        Animated.timing(scanAnimation, {
+        Animated.timing(scanAnim, {
           toValue: 0,
-          duration: 2500,
+          duration: 0,  // Reset instantly
           useNativeDriver: true,
         }),
-      ]),
+      ])
     ).start();
   };
 
-  const checkPermissions = useCallback(async () => {
-    // Check both location and camera permissions
-    // Get camera status from hook, fetch location status
-    const locationStatus = await Location.getForegroundPermissionsAsync();
+  const stopScanAnimation = () => {
+    scanAnim.stopAnimation();
+    scanAnim.setValue(0);
+  };
 
-    if (cameraPermission?.granted && locationStatus.granted) {
+  // Permissions
+  const checkPermissions = useCallback(async () => {
+    const locStatus = await Location.getForegroundPermissionsAsync();
+
+    if (cameraPermission?.granted && locStatus.granted) {
       setPermissionStatus('granted');
     } else {
       setPermissionStatus('denied');
     }
   }, [cameraPermission]);
 
-  useFocusEffect(
-    useCallback(() => {
-      // Reset scan status when screen is focused
-      setScanStatus('scanning');
-      setStatusMessage('');
-      isScanning.current = false;
-
-      checkPermissions();
-
-      if (permissionStatus === 'granted') {
-        startAnimation();
-      }
-      // Re-run animation if permission is granted while focused
-    }, [checkPermissions, permissionStatus])
-  );
-
   const requestPermissions = async () => {
     await requestCameraPermission();
     await Location.requestForegroundPermissionsAsync();
-    checkPermissions(); // Re-check after requests
+    checkPermissions();
   };
 
-  const handleBarCodeScanned = useCallback(
-    async ({ data }: BarcodeScanningResult) => {
-      if (isScanning.current) return;
-      isScanning.current = true; // Set lock
+  // Lifecycle management
+  useFocusEffect(
+    useCallback(() => {
+      // Reset state when screen comes into focus
+      setScanStatus('scanning');
+      setErrorMessage('');
+      setCameraActive(true);
+      isProcessingRef.current = false;
 
-      setScanStatus('loading');
-      setStatusMessage('Verifying QR Code...');
+      checkPermissions();
 
-      try {
-        let qrData;
-        try {
-          qrData = JSON.parse(data);
-        } catch (parseError) {
-          throw new Error('Invalid QR Code. Not valid JSON.');
-        }
-
-        if (!qrData.token) throw new Error('QR code missing required token');
-
-        const validateResponse = await qr.validate({ token: qrData.token });
-        if (!validateResponse.valid) {
-          throw new Error(validateResponse.message || 'Invalid or expired QR code.');
-        }
-
-        const { classId } = validateResponse;
-        const scheduleId = qrData.scheduleId;
-
-        // Navigate to enhanced face verification (no longer needs AWS session ID)
-        navigation.navigate('FaceLiveness', { classId, scheduleId });
-      } catch (err: any) {
-        console.error('QR scan error:', err);
-        setScanStatus('error');
-        setStatusMessage(err.message || 'An unknown error occurred.');
+      // Start animation if we are ready
+      if (permissionStatus === 'granted') {
+        startScanAnimation();
       }
-    }, [navigation]);
 
-  const animatedStyle = {
-    transform: [
-      {
-        translateY: scanAnimation.interpolate({
-          inputRange: [0, 1],
-          outputRange: [0, QR_FRAME_SIZE],
-        }),
-      },
-    ],
+      return () => stopScanAnimation();
+    }, [checkPermissions, permissionStatus])
+  );
+
+  // Scanning Logic
+  const handleBarCodeScanned = async ({ data }: BarcodeScanningResult) => {
+    // 1. Immediate Lock to prevent multiple triggers
+    if (isProcessingRef.current || scanStatus !== 'scanning') return;
+    isProcessingRef.current = true; // Set lock
+
+    // 2. UX Feedback
+    Vibration.vibrate();
+    setScanStatus('processing');
+    stopScanAnimation();
+
+    try {
+      // 3. Parse QR Data
+      let qrPayload;
+      try {
+        qrPayload = JSON.parse(data);
+      } catch (parseError) {
+        throw new Error('Invalid QR Format.');
+      }
+
+      if (!qrPayload.token) throw new Error('Invalid Class Token.');
+
+      // 4. Parallel Execution: Validate Token AND Get Location
+      // We wrap location in a promise that rejects after 5 seconds to prevent hanging
+      // const locationPromise = Promise.race([
+      //   Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
+      //   new Promise((_, reject) => setTimeout(() => reject(new Error('Location timeout')), 5000))
+      // ]);
+
+      const validatePromise = qr.validate({ token: qrPayload.token });
+
+      const [validateResponse]: [any] = await Promise.all([
+        // locationPromise,
+        validatePromise
+      ]);
+
+      if (!validateResponse.valid) {
+        throw new Error(validateResponse.message || 'Session expired or invalid.');
+      }
+
+      // 5. Success - Navigate
+      setScanStatus('success');
+
+      setCameraActive(false);
+
+      setTimeout(() => {
+        navigation.navigate('FaceLiveness', {
+          classId: validateResponse.classId,
+          scheduleId: qrPayload.scheduleId,
+        });
+      }, 100);
+    } catch (err: any) {
+      console.error('Scan Error:', err);
+      setScanStatus('error');
+      setErrorMessage(err.message || 'Failed to verify QR code.');
+      isProcessingRef.current = false; // Allow retry
+    }
   };
 
-  const renderContent = () => {
-    if (permissionStatus === 'checking') {
-      return (
-        <View style={styles.fullScreenCenter}>
-          <ActivityIndicator size="large" color={colors.primary} />
-        </View>
-      );
-    }
+  const handleRetry = () => {
+    setScanStatus('scanning');
+    setErrorMessage('');
+    isProcessingRef.current = false;
+    startScanAnimation();
+  };
 
-    if (permissionStatus === 'denied') {
-      return (
-        <View style={styles.fullScreenCenter}>
-          <MaterialCommunityIcons
-            name="shield-alert-outline"
-            size={60}
-            color={colors.error}
-          />
-          <Text
-            variant="headlineSmall"
-            style={[styles.permissionTitle, { color: colors.onSurface }]}
-          >
-            Permissions Required
-          </Text>
-          <Text
-            variant="bodyLarge"
-            style={[styles.permissionText, { color: colors.onSurfaceVariant }]}
-          >
-            This app needs access to your camera and location to verify
-            attendance.
-          </Text>
+  // --- Render Helpers ---
+
+  const renderOverlay = () => (
+    <View style={styles.overlay}>
+      {/* Top Dimmed Area */}
+      <View style={styles.dimmed} />
+
+      {/* Middle Area with Frame */}
+      <View style={styles.middleRow}>
+        <View style={styles.dimmed} />
+
+        {/* The Scan Frame */}
+        <View style={[styles.scanFrame, { borderColor: getFrameColor() }]}>
+
+          {/* Corner Markers */}
+          <View style={[styles.corner, styles.topLeft]} />
+          <View style={[styles.corner, styles.topRight]} />
+          <View style={[styles.corner, styles.bottomLeft]} />
+          <View style={[styles.corner, styles.bottomRight]} />
+
+          {/* Animated Line (Only when scanning) */}
+          {scanStatus === 'scanning' && (
+            <Animated.View
+              style={[
+                styles.laserLine,
+                {
+                  backgroundColor: colors.primary,
+                  transform: [{
+                    translateY: scanAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0, QR_FRAME_SIZE],
+                    }),
+                  }],
+                },
+              ]}
+            />
+          )}
+
+          {/* Loading Indicator */}
+          {scanStatus === 'processing' && (
+            <View style={styles.feedbackContainer}>
+              <ActivityIndicator size="large" color="#fff" />
+              <Text style={styles.feedbackText}>Verifying...</Text>
+            </View>
+          )}
+
+          {/* Error Indicator */}
+          {scanStatus === 'error' && (
+            <View style={[styles.feedbackContainer, { backgroundColor: 'rgba(186, 26, 26, 0.9)' }]}>
+              <MaterialCommunityIcons name="alert-circle-outline" size={48} color="#fff" />
+              <Text style={styles.feedbackText}>Scan Failed</Text>
+            </View>
+          )}
+        </View>
+
+        <View style={styles.dimmed} />
+      </View>
+
+      {/* Bottom Dimmed Area */}
+      <View style={styles.dimmed}>
+        <Text style={styles.hintText}>
+          {scanStatus === 'error' ? errorMessage : "Align QR code within the frame"}
+        </Text>
+
+        {scanStatus === 'error' && (
           <Button
             mode="contained"
-            onPress={requestPermissions}
-            style={styles.permissionButton}
+            onPress={handleRetry}
+            icon="refresh"
+            style={{ marginTop: 20 }}
+            buttonColor={colors.error}
           >
-            Grant Permissions
+            Try Again
           </Button>
-        </View>
-      );
-    }
-
-    return (
-      <View style={StyleSheet.absoluteFillObject}>
-        <CameraView
-          style={StyleSheet.absoluteFillObject}
-          facing="back"
-          active={
-            isFocused && permissionStatus === 'granted' && scanStatus === 'scanning'
-          }
-          onBarcodeScanned={
-            scanStatus === 'scanning' ? handleBarCodeScanned : undefined
-          }
-          barcodeScannerSettings={{
-            barcodeTypes: ['qr'] as BarcodeType[],
-          }}
-        />
-
-        {/* --- UPDATED: New centered overlay layout --- */}
-        <View style={styles.overlay}>
-          {/* Top dark section */}
-          <View style={styles.overlayTop}>
-            <Text style={styles.hintText}>
-              Align QR code within the frame
-            </Text>
-          </View>
-
-          {/* Middle row (transparent sides, centered frame) */}
-          <View style={styles.overlayMiddle}>
-            <View style={styles.overlaySide} />
-            <View style={[styles.qrFrame, { borderColor: 'white' }]}>
-              {scanStatus === 'scanning' && (
-                <Animated.View
-                  style={[
-                    styles.scanLine,
-                    { backgroundColor: colors.primary },
-                    animatedStyle,
-                  ]}
-                />
-              )}
-              {scanStatus !== 'scanning' && (
-                <View style={styles.statusContainer}>
-                  {scanStatus === 'loading' && (
-                    <ActivityIndicator size="large" color="white" />
-                  )}
-                  {scanStatus === 'error' && (
-                    <MaterialCommunityIcons
-                      name="close-circle-outline"
-                      size={80}
-                      color={colors.error}
-                    />
-                  )}
-                  <Text style={[styles.statusText, { color: 'white' }]}>
-                    {statusMessage}
-                  </Text>
-                </View>
-              )}
-            </View>
-            <View style={styles.overlaySide} />
-          </View>
-
-          {/* Bottom dark section */}
-          <View style={styles.overlayBottom}>
-            {scanStatus !== 'scanning' && (
-              <Button
-                icon="camera-retake-outline"
-                mode="contained"
-                onPress={() => {
-                  setScanStatus('scanning');
-                  setStatusMessage('');
-                  isScanning.current = false; // Reset lock
-                  startAnimation();
-                }}
-              >
-                Scan Again
-              </Button>
-            )}
-          </View>
-        </View>
+        )}
       </View>
-    );
+    </View>
+  );
+
+  const getFrameColor = () => {
+    if (scanStatus === 'success') return '#4CAF50';
+    if (scanStatus === 'error') return colors.error;
+    return '#fff';
   };
 
+  // --- Main Render ---
+
+  if (permissionStatus === 'checking') {
+    return (
+      <View style={[styles.container, { backgroundColor: '#000' }]}>
+        <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
+  }
+
+  if (permissionStatus === 'denied') {
+    return (
+      <View style={[styles.container, { backgroundColor: colors.background, padding: 30 }]}>
+        <MaterialCommunityIcons name="camera-off" size={64} color={colors.error} />
+        <Text variant="headlineSmall" style={{ marginTop: 20, fontWeight: 'bold' }}>Permission Required</Text>
+        <Text style={{ textAlign: 'center', marginVertical: 10, color: colors.onSurfaceVariant }}>
+          We need access to your Camera and Location to mark attendance securely.
+        </Text>
+        <Button mode="contained" onPress={requestPermissions} style={{ marginTop: 20 }}>
+          Grant Access
+        </Button>
+      </View>
+    );
+  }
+
   return (
-    <View style={[styles.container, { backgroundColor: colors.background }]}>
-      {renderContent()}
+    <View style={styles.container}>
+      {isFocused && cameraActive && permissionStatus === 'granted' && (
+        <CameraView
+          style={StyleSheet.absoluteFill}
+          facing="back"
+          // OPTIMIZATION: Do not unmount camera, just stop listening to events
+          onBarcodeScanned={scanStatus === 'scanning' ? handleBarCodeScanned : undefined}
+          barcodeScannerSettings={{
+            barcodeTypes: ['qr'], // Optimize: only look for QRs
+          }}
+        />
+      )}
+      {renderOverlay()}
     </View>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  fullScreenCenter: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 30,
-    width: '100%',
-  },
-  permissionTitle: {
-    fontWeight: 'bold',
-    marginVertical: 16,
-    textAlign: 'center',
-  },
-  permissionText: {
-    textAlign: 'center',
-    marginBottom: 24,
-    lineHeight: 22,
-  },
-  permissionButton: {
-    width: '80%',
-  },
-  overlay: {
-    ...StyleSheet.absoluteFillObject,
-    flex: 1,
-    backgroundColor: 'transparent',
-  },
-  overlayTop: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-    paddingBottom: 20,
-  },
-  hintText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '500',
-  },
-  overlayMiddle: {
-    height: QR_FRAME_SIZE,
-    flexDirection: 'row',
-  },
-  overlaySide: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
-  },
-  qrFrame: {
+  container: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  overlay: { ...StyleSheet.absoluteFillObject },
+  dimmed: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center' },
+  middleRow: { flexDirection: 'row', height: QR_FRAME_SIZE },
+  
+  scanFrame: {
     width: QR_FRAME_SIZE,
     height: QR_FRAME_SIZE,
     borderWidth: 2,
-    borderRadius: 12,
+    borderColor: '#fff',
+    backgroundColor: 'transparent',
     overflow: 'hidden',
-    justifyContent: 'center',
-    alignItems: 'center',
+    position: 'relative',
+    borderRadius: 20,
   },
-  overlayBottom: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    alignItems: 'center',
-    justifyContent: 'flex-start',
-    paddingTop: 40,
-  },
-  scanLine: {
+  
+  // Fancy Corners
+  corner: { position: 'absolute', width: 20, height: 20, borderColor: '#fff', borderWidth: 4 },
+  topLeft: { top: 0, left: 0, borderRightWidth: 0, borderBottomWidth: 0 },
+  topRight: { top: 0, right: 0, borderLeftWidth: 0, borderBottomWidth: 0 },
+  bottomLeft: { bottom: 0, left: 0, borderRightWidth: 0, borderTopWidth: 0 },
+  bottomRight: { bottom: 0, right: 0, borderLeftWidth: 0, borderTopWidth: 0 },
+
+  laserLine: {
     width: '100%',
     height: 3,
-    elevation: 2,
-    position: 'absolute',
-    top: -2, // Start just above the frame
+    opacity: 0.8,
+    shadowColor: '#000',
+    shadowOpacity: 0.5,
+    shadowRadius: 5,
+    shadowOffset: { width: 0, height: 0 },
   },
-  statusContainer: {
-    padding: 16,
-    borderRadius: 12,
-    alignItems: 'center',
+
+  feedbackContainer: {
+    ...StyleSheet.absoluteFillObject,
     justifyContent: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    width: '100%',
-    height: '100%',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.4)',
   },
-  statusText: {
-    fontSize: 16,
-    marginTop: 16,
-    textAlign: 'center',
+  feedbackText: {
+    color: '#fff',
+    marginTop: 10,
     fontWeight: 'bold',
+    fontSize: 18,
+  },
+  hintText: {
+    color: '#fff',
+    fontSize: 16,
+    textAlign: 'center',
+    paddingHorizontal: 40,
   },
 });
 
